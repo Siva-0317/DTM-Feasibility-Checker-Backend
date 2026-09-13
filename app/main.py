@@ -11,13 +11,15 @@ from app.models.job import Job
 
 logger = logging.getLogger(__name__)
 
+# Ensure directories exist before mounting static files
+os.makedirs(settings.upload_dir, exist_ok=True)
+os.makedirs(settings.output_dir, exist_ok=True)
+
 # In-memory job store
 jobs: dict[str, Job] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    os.makedirs(settings.upload_dir, exist_ok=True)
-    os.makedirs(settings.output_dir, exist_ok=True)
     yield
 
 app = FastAPI(title="BIW DTM Compliance Checker API", lifespan=lifespan)
