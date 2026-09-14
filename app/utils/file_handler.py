@@ -5,7 +5,7 @@ from fastapi import UploadFile
 async def save_upload_file(file: UploadFile, upload_dir: str) -> str:
     """Saves file, returns path."""
     os.makedirs(upload_dir, exist_ok=True)
-    file_path = os.path.join(upload_dir, file.filename)
+    file_path = os.path.abspath(os.path.join(upload_dir, file.filename))
     
     async with aiofiles.open(file_path, 'wb') as out_file:
         while content := await file.read(1024 * 1024):  # read 1MB at a time

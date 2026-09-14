@@ -38,7 +38,17 @@ def process_cad_job(job_id: str, file_path: str, door_type: str):
         logger.error(f"Job {job_id} failed: {e}")
         if job_id in jobs:
             jobs[job_id].status = JobStatus.FAILED
-            jobs[job_id].result = {"error": str(e)}
+            jobs[job_id].result = {
+                "error": str(e),
+                "dtm_report": {
+                    "job_id": job_id,
+                    "door_type": door_type,
+                    "rules": [],
+                    "overall_status": "ERROR",
+                    "pass_count": 0,
+                    "fail_count": 0
+                }
+            }
 
 @router.post("")
 async def upload_step_file(

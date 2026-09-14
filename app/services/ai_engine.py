@@ -1,5 +1,6 @@
 import logging
 import httpx
+import re
 from datetime import datetime, timezone
 from typing import Dict, Any
 
@@ -40,7 +41,7 @@ def build_remediation_prompt(report: DTMReport) -> str:
             "4. Estimated rework risk level (LOW/MEDIUM/HIGH).\n"
         )
         
-    return f"{system_prompt}\n\n{user_prompt}"
+    return {"system": system_prompt, "user": user_prompt}
 
 def fallback_response(report: DTMReport) -> str:
     failed_rules = [r for r in report.rules if r.status == "FAIL"]
@@ -63,46 +64,64 @@ def fallback_response(report: DTMReport) -> str:
     advice += "Tooling Implications: Moderate tooling update required.\nRisk Level: MEDIUM\n"
     return advice
 
-async def call_hf_inference_api(prompt: str, config: Settings, report: DTMReport) -> str:
-    if not config.hf_api_token or config.hf_api_token == "your_token_here":
-        logger.warning("HF_API_TOKEN is not configured. Using fallback.")
-        return fallback_response(report)
-        
+async def call_lm_studio_api(prompt: Dict[str, str], config: Settings, report: DTMReport) -> str:
     headers = {
-        "Authorization": f"Bearer {config.hf_api_token}",
         "Content-Type": "application/json"
     }
+    
     payload = {
-        "inputs": prompt,
-        "parameters": {
-            "max_new_tokens": 800,
-            "temperature": 0.3,
-            "return_full_text": False
-        }
+        "model": "local-model",
+        "messages": [
+            {"role": "system", "content": prompt["system"]},
+            {"role": "user", "content": prompt["user"]}
+        ],
+        "temperature": 0.7,
+        "max_tokens": 4096,
+        "stream": False
     }
     
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(config.hf_model_url, headers=headers, json=payload)
+        # timeout is 300 seconds for slow local models
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            response = await client.post(config.lmstudio_model_url, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
-            if isinstance(data, list) and len(data) > 0 and "generated_text" in data[0]:
-                return data[0]["generated_text"].strip()
-            elif isinstance(data, dict) and "generated_text" in data:
-                return data["generated_text"].strip()
-            elif isinstance(data, dict) and "error" in data:
-                logger.error(f"HF API Error: {data['error']}")
+            
+            if "choices" in data and len(data["choices"]) > 0:
+                msg = data["choices"][0]["message"]
+                content = msg.get("content")
+                if content is None:
+                    # Model might return null content if it hits a safety filter or only returns reasoning
+                    reasoning = msg.get("reasoning_content")
+                    if reasoning:
+                        return reasoning.strip()
+                    logger.error(f"LM Studio API Error: returned null content. Raw: {data}")
+                    return fallback_response(report)
+                
+                content = content.strip()
+                # Local reasoning models often swallow the opening <think> tag, so we split by the closing tag
+                if "</think>" in content:
+                    content = content.split("</think>")[-1].strip()
+                else:
+                    content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+                
+                # Also strip raw <think> tags if they are dangling at the end
+                content = content.replace("<think>", "").strip()
+                return content
+            elif "error" in data:
+                logger.error(f"LM Studio API Error: {data['error']}")
                 return fallback_response(report)
             else:
                 return str(data)
     except Exception as e:
-        logger.error(f"Failed to call HF Inference API: {e}")
+        import traceback
+        logger.error(f"Failed to call LM Studio Inference API: {e}\n{traceback.format_exc()}")
         return fallback_response(report)
 
 async def generate_remediation_report(report: DTMReport, config: Settings) -> Dict[str, Any]:
     prompt = build_remediation_prompt(report)
     
-    ai_advice = await call_hf_inference_api(prompt, config, report)
+    ai_advice = await call_lm_studio_api(prompt, config, report)
     
     failed_rules = [r for r in report.rules if r.status == "FAIL"]
     summary = [{"rule": r.rule_name, "fix_priority": r.severity} for r in failed_rules]

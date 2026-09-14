@@ -27,7 +27,15 @@ def load_step_file(file_path: str) -> TopoDS_Shape:
             raise ValueError(f"Error reading STEP file: {file_path}")
         
         reader.TransferRoots()
-        shape = reader.OneShape()
+        
+        if reader.NbShapes() == 0:
+            raise ValueError(f"The STEP file {file_path} contains no valid 3D geometry. (Check your CATIA export settings to ensure B-Rep solids are exported, not just empty product nodes.)")
+            
+        shape = reader.Shape() # Use Shape() to capture assemblies
+        
+        if shape is None or shape.IsNull():
+            raise ValueError(f"The STEP file {file_path} contains no valid 3D B-Rep geometry.")
+            
         return shape
     except Exception as e:
         logger.error(f"Failed to load STEP file {file_path}: {e}")
@@ -104,21 +112,6 @@ def get_edge_length(edge: TopoDS_Edge) -> float:
         logger.warning(f"Error computing edge length: {e}")
         return 0.0
 
-def measure_fillet_radius(edge: TopoDS_Edge, shape: Optional[TopoDS_Shape] = None) -> Optional[float]:
-    if shape is None:
-        return None
-    try:
-        for face in get_all_faces(shape):
-            edges_in_face = get_all_edges(face)
-            if any(e.IsSame(edge) for e in edges_in_face):
-                adaptor = BRepAdaptor_Surface(face)
-                if adaptor.GetType() == GeomAbs_Cylinder:
-                    return float(adaptor.Cylinder().Radius())
-        return None
-    except Exception as e:
-        logger.warning(f"Error measuring fillet radius: {e}")
-        return None
-
 def get_edge_midpoint(edge: TopoDS_Edge) -> Tuple[float, float, float]:
     try:
         res = BRep_Tool.Curve(edge)
@@ -158,19 +151,17 @@ def get_bottom_edges(shape: TopoDS_Shape, z_threshold_percentile: float = 0.15) 
     bottom_edges = []
     try:
         bbox = compute_bounding_box(shape)
-        zmin = bbox["zmin"]
-        zmax = bbox["zmax"]
-        threshold_z = zmin + (zmax - zmin) * z_threshold_percentile
+        threshold_z = bbox["zmin"] + (bbox["zmax"] - bbox["zmin"]) * z_threshold_percentile
         
         all_edges = get_all_edges(shape)
+        # Process at most 10,000 edges for performance
+        if len(all_edges) > 10000:
+            import random
+            all_edges = random.sample(all_edges, 10000)
+            
         for edge in all_edges:
-            edge_bbox = Bnd_Box()
-            brepbndlib.Add(edge, edge_bbox)
-            
-            eminX, eminY, eminZ, emaxX, emaxY, emaxZ = edge_bbox.Get()
-            edge_z_center = (eminZ + emaxZ) / 2.0
-            
-            if edge_z_center <= threshold_z:
+            mid = get_edge_midpoint(edge)
+            if mid[2] <= threshold_z:
                 bottom_edges.append(edge)
     except Exception as e:
         logger.warning(f"Error finding bottom edges: {e}")
@@ -230,7 +221,20 @@ def extract_geometry_report(shape: TopoDS_Shape) -> Dict[str, Any]:
     try:
         faces = get_all_faces(shape)
         edges = get_all_edges(shape)
-        hole_count = count_holes_by_topology(shape)
+        
+        # Performance: Limit faces to 5000 for counting holes to avoid freeze
+        faces_for_holes = faces[:5000] if len(faces) > 5000 else faces
+        
+        hole_count = 0
+        for face in faces_for_holes:
+            wire_count = 0
+            exp_wire = TopExp_Explorer(face, TopAbs_WIRE)
+            while exp_wire.More():
+                wire_count += 1
+                exp_wire.Next()
+            if wire_count > 1:
+                hole_count += (wire_count - 1)
+        
         bbox = compute_bounding_box(shape)
         
         bottom_edges_objs = get_bottom_edges(shape)
@@ -241,16 +245,26 @@ def extract_geometry_report(shape: TopoDS_Shape) -> Dict[str, Any]:
                 "midpoint": list(get_edge_midpoint(e))
             })
             
+        # O(F) fillet extraction instead of O(E*F)
         fillet_radii = []
-        for e in edges:
-            rad = measure_fillet_radius(e, shape)
-            if rad is not None:
-                fillet_radii.append({
-                    "radius": rad,
-                    "location": list(get_edge_midpoint(e))
-                })
+        faces_to_process = faces[:5000] if len(faces) > 5000 else faces
+        for face in faces_to_process:
+            try:
+                adaptor = BRepAdaptor_Surface(face)
+                if adaptor.GetType() == GeomAbs_Cylinder:
+                    rad = float(adaptor.Cylinder().Radius())
+                    f_edges = get_all_edges(face)
+                    if f_edges:
+                        fillet_radii.append({
+                            "radius": rad,
+                            "location": list(get_edge_midpoint(f_edges[0]))
+                        })
+                        if len(fillet_radii) >= 1000:
+                            break
+            except:
+                pass
                 
-        face_groups = classify_faces_by_normal(faces)
+        face_groups = classify_faces_by_normal(faces[:5000] if len(faces) > 5000 else faces)
         face_groups_count = {k: len(v) for k, v in face_groups.items()}
         
         return {

@@ -26,8 +26,12 @@ def check_rule_1(shape: TopoDS_Shape, geometry_report: Dict[str, Any], door_type
         coords = []
         if len(horiz_faces) >= 2:
             min_d = float('inf')
-            for i in range(len(horiz_faces)):
-                for j in range(i+1, min(i+5, len(horiz_faces))): # limit search for perf
+            
+            # Performance limit: only check first 500 horizontal faces
+            limit = min(500, len(horiz_faces))
+            
+            for i in range(limit):
+                for j in range(i+1, min(i+5, limit)): # limit search for perf
                     d = measure_face_to_face_distance(horiz_faces[i], horiz_faces[j])
                     if 0 < d < min_d:
                         min_d = d

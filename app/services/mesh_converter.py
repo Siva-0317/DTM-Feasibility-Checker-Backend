@@ -1,6 +1,10 @@
 import logging
 import os
 import numpy as np
+if not hasattr(np, 'ptp'):
+    def _ptp(a, axis=None, out=None, keepdims=False):
+        return np.max(a, axis=axis, keepdims=keepdims) - np.min(a, axis=axis, keepdims=keepdims)
+    np.ptp = _ptp
 import trimesh
 from typing import Dict, Any, Tuple
 
@@ -15,7 +19,7 @@ from app.services.cad_parser import load_step_file, compute_bounding_box
 
 logger = logging.getLogger(__name__)
 
-def tessellate_shape(shape: TopoDS_Shape, linear_deflection: float = 0.5, angular_deflection: float = 0.5) -> Dict[str, Any]:
+def tessellate_shape(shape: TopoDS_Shape, linear_deflection: float = 2.0, angular_deflection: float = 1.0) -> Dict[str, Any]:
     try:
         mesh_alg = BRepMesh_IncrementalMesh(shape, linear_deflection, False, angular_deflection, True)
         mesh_alg.Perform()
